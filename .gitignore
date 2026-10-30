@@ -1,0 +1,25 @@
+# Environment variables and secrets
+.env
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+
+# Editor settings
+.vscode/
+.idea/
+# Local exports and browser diagnostics
+output/
+page_inspections/
+*_timeout.png
+response*.json
+.env.*
+!.env.example
