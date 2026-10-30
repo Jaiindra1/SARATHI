@@ -32,6 +32,7 @@
             id="product-query"
             placeholder="Search products, e.g. Samsung A56"
             value="{{ query }}"
+            maxlength="200"
             required
         >
         <button type="submit">Find products <span aria-hidden="true">&#8594;</span></button>
@@ -90,7 +91,8 @@
             </div>
         </div>
 
-    <div id="results-container" aria-live="polite">
+    {% if job_id %}<noscript><p>Search submitted. Reload this page to check progress and results.</p></noscript>{% endif %}
+    <div id="results-container" aria-live="polite" data-job-id="{{ job_id }}">
         {% if message %}
             <p>{{ message }}</p>
         {% endif %}

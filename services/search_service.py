@@ -71,7 +71,7 @@ def detect_category(query: str, product_name: str) -> str:
 
 
 
-def search_products(query: str, max_results: int = 20) -> list[dict]:
+def search_products(query: str, max_results: int = 20, *, progress=None) -> list[dict]:
 
     """Search Flipkart and Amazon and combine their product results."""
 
@@ -92,18 +92,25 @@ def search_products(query: str, max_results: int = 20) -> list[dict]:
         ("Flipkart", search_flipkart),
         ("Amazon", search_amazon),
     ]:
+        if progress is not None:
+            progress(retailer_name, "running")
         try:
             retailer_results[retailer_name] = search_function(
                 query=query,
                 max_results=max_results,
                 raise_on_error=True,
             )
+            if progress is not None:
+                count = len(retailer_results[retailer_name])
+                progress(retailer_name, "completed" if count else "empty", count=count)
         except Exception as error:
             stage = error.stage if isinstance(error, RetailerSearchError) else "unexpected_failure"
             logger.error("Retailer unavailable retailer=%s stage=%s error_type=%s",
                          retailer_name, stage, type(error).__name__)
             retailer_results[retailer_name] = []
             retailer_errors.append(retailer_name)
+            if progress is not None:
+                progress(retailer_name, "failed", stage=stage)
 
     # Report an error only if both retailer searches raised exceptions.
     if len(retailer_errors) == 2:

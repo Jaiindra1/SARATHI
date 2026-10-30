@@ -1,10 +1,10 @@
 import re
+from uuid import uuid4
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, redirect, url_for
 
-from services.search_service import search_products
+from services.search_jobs import search_jobs, SearchBusy, RequestConflict
 from services.feedback_service import send_feedback_email
-from retailers.outcomes import AllRetailersFailed
 
 
 app = Flask(__name__, template_folder="templates")
@@ -29,85 +29,85 @@ def is_valid_email(email):
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) is not None
 
 
+def validated_query(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Please enter a product name.")
+    if len(value.strip()) > 200:
+        raise ValueError("Please keep the product name to 200 characters or fewer.")
+    return value.strip()
+
+
 @app.route("/", methods=["GET", "POST"])
 def home():
-
-    query = ""
-    products = []
-    message = ""
-
+    query, products, message = "", [], ""
+    job_id = request.args.get("job", "") if request.method == "GET" else ""
+    status_code = 200
     if request.method == "POST":
-        query = request.form.get("query", "").strip()
-
-        if not query:
-            message = "Please enter a product name."
+        try:
+            query = validated_query(request.form.get("query"))
+            submission = search_jobs.submit(query, request.form.get("request_id", uuid4().hex))
+            job_id = submission["job_id"]
+            return redirect(url_for("home", job=job_id), code=303)
+        except ValueError as error:
+            message, status_code = str(error), 400
+        except (SearchBusy, RequestConflict) as error:
+            message, status_code = str(error), 409
+        except Exception:
+            app.logger.exception("Unable to submit product search")
+            message, status_code = "Unable to start search. Please try again later.", 503
+    if job_id:
+        job = search_jobs.get(job_id, include_products=True)
+        if job is None:
+            message = "This search is unavailable. The service may have restarted or the search expired. Please search again."
+            job_id = ""
         else:
-            try:
-                products = search_products(query, max_results=20)
-
-                if not products:
-                    message = "No products found. Try another search."
-
-            except Exception:
-                app.logger.exception("Product search failed")
-                message = "Product search failed. Please try again later."
-
-    return render_template(
-        "index.html",
-        query=query,
-        products=products,
-        message=message,
-    )
+            query, message = job["query"], job["message"]
+            if job["status"] in {"completed", "failed"}:
+                products = job["products"]
+    return render_template("index.html", query=query, products=products,
+                           message=message, job_id=job_id), status_code
 
 
-# NEW: AJAX search endpoint.
 @app.route("/api/search", methods=["POST"])
 def api_search():
-
-    # Read the search query from the JSON request.
-    data = request.get_json(silent=True) or {}
-    query = data.get("query", "")
-
-    # Validate the query.
-    if not isinstance(query, str) or not query.strip():
-        return jsonify({
-            "success": False,
-            "message": "Please enter a product name.",
-            "products": [],
-        }), 400
-
-    query = query.strip()
-
+    data = request.get_json(silent=True)
     try:
-        # Reuse the existing product-search service.
-        products = search_products(query, max_results=20)
-
-        return jsonify({
-            "success": True,
-            "message": (
-                "Products found successfully."
-                if products
-                else "No matching products found. Try another search."
-            ),
-            "products": products,
-        }), 200
-
-    except AllRetailersFailed:
-        app.logger.error("AJAX product search failed: all retailers unavailable")
-        return jsonify({
-            "success": False,
-            "message": "Retailer searches are unavailable. Please try again later.",
-            "products": [],
-        }), 502
-
+        query = validated_query(data.get("query") if isinstance(data, dict) else None)
+        submission = search_jobs.submit(query, data.get("request_id"))
+        job_id = submission["job_id"]
+    except ValueError as error:
+        return jsonify(success=False, message=str(error), products=[]), 400
+    except (SearchBusy, RequestConflict) as error:
+        return jsonify(success=False, message=str(error), products=[]), 409
     except Exception:
-        app.logger.exception("AJAX product search failed")
+        app.logger.exception("Unable to submit product search")
+        return jsonify(success=False, message="Unable to start search. Please try again later.", products=[]), 503
+    return jsonify(success=True, job_id=job_id, status=submission["status"],
+                   status_url=url_for("job_status", job_id=job_id),
+                   results_url=url_for("job_results", job_id=job_id)), 202
 
-        return jsonify({
-            "success": False,
-            "message": "Product search failed. Please try again later.",
-            "products": [],
-        }), 500
+
+def job_response(job_id, include_products=False):
+    job = search_jobs.get(job_id, include_products=include_products)
+    if job is None:
+        response = jsonify(success=False, message="This search is unavailable. The service may have restarted or the search expired. Please search again.")
+        response.status_code = 404
+    else:
+        response = jsonify(success=job["status"] != "failed", **job)
+        if include_products and job["status"] in {"queued", "running"}:
+            response.status_code = 202
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/search/<job_id>/status")
+def job_status(job_id):
+    return job_response(job_id)
+
+
+@app.route("/api/search/<job_id>/results")
+def job_results(job_id):
+    return job_response(job_id, include_products=True)
 
 
 @app.route("/feedback", methods=["GET", "POST"])

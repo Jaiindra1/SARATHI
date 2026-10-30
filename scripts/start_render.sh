@@ -17,6 +17,7 @@ except Exception as error:
     raise SystemExit('Browser readiness failed; inspect search-diagnostics logs.') from None
 PY
 
-# Explicit port binding is required in the container. Keep Gunicorn's timeout;
-# moving driver discovery/downloads out of requests addresses the observed stall.
-exec gunicorn --bind "0.0.0.0:${PORT:-10000}" main:app
+# In-memory jobs require exactly one process. Ignore environment CLI/config
+# injection; explicit flags also override WEB_CONCURRENCY and config defaults.
+unset GUNICORN_CMD_ARGS
+exec gunicorn --config /dev/null --workers 1 --worker-class gthread --threads 2 --timeout 30 --bind "0.0.0.0:${PORT:-10000}" main:app

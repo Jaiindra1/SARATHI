@@ -11,8 +11,8 @@ Activate it:
 ## Manual production search diagnostics
 
 Set `SEARCH_DIAGNOSTICS=1` in the Render service's environment and deploy the
-diagnostic changes. Keep `gunicorn main:app` and the existing browser options.
-No new dependency, frontend change, or diagnostic HTTP endpoint is required.
+diagnostic changes. Use `sh scripts/start_render.sh` and the existing browser options.
+No new dependency or diagnostic HTTP endpoint is required.
 
 Open the deployed website, search for a common product such as `headphones`, and
 inspect Render runtime logs for `[search-diagnostics]`. Each retailer attempt has
@@ -69,7 +69,7 @@ Render configuration for the existing service (do not create a duplicate service
 - Docker Command: leave unset so the image runs `sh scripts/start_render.sh`.
 - Equivalent local image build: `docker build -t sarathi .`.
 - The startup script launches a real browser on a local data URL, closes it, and
-  then starts `gunicorn --bind "0.0.0.0:${PORT:-10000}" main:app`.
+  then starts Gunicorn with the single-worker configuration documented below.
 - Gunicorn's timeout is not increased. Readiness happens before Gunicorn starts.
 
 These defaults are provided by the image; ensure existing Render environment
@@ -122,7 +122,7 @@ https://render.com/docs/docker.
 
 In the existing Render service, open **Environment**, add the following variables,
 and save/redeploy the updated code. Keep the current Docker configuration,
-browser paths, and Gunicorn command unchanged:
+browser paths, and use the startup script documented below:
 
 ```dotenv
 SELENIUM_PAGE_LOAD_STRATEGY=eager
@@ -168,9 +168,128 @@ Manual verification:
 Limitations: the timeout is enforced by ChromeDriver, not an overall Python request
 deadline. An unresponsive driver or cleanup operation may still block. Fatal
 worker termination may prevent completion/failure logs from being emitted.
-The current 30-second Gunicorn limit remains unchanged, as do Flipkart's 25- and
-5-second product waits and Amazon's 25-second wait. Two separate browser startups,
-navigation, waits, cleanup, and serialization may still exceed that limit; Amazon
-fallback is not guaranteed within it. This milestone does not add request budgets,
+The 30-second Gunicorn timeout remains unchanged, as do Flipkart's 25- and
+5-second product waits and Amazon's 25-second wait. In the earlier synchronous
+flow, browser startups, navigation, waits, and cleanup could exceed that HTTP
+worker limit. The background-search implementation below moves this work out of
+the HTTP request. This navigation milestone does not add request budgets,
 retries, process-killing logic, or automated test suites. Production success must
 be established by a real website search and its Render logs after deployment.
+
+
+## Background product searches (current architecture)
+
+Both `POST /` and `POST /api/search` use one process-local job manager.
+The API returns HTTP 202 with a random job ID immediately. The ordinary form
+returns a 303 redirect to `/?job=<id>`; without JavaScript, reload that page to
+check progress/results. JavaScript polls `/api/search/<id>/status` every two
+seconds, then fetches `/api/search/<id>/results` and uses the existing product
+cards. The URL retains the job ID so a reload can reconnect after connection loss.
+Requests have 15-second deadlines; transient polling connection failures are
+retried up to three attempts. Missing jobs explicitly report restart or expiry.
+Terminal status and results stop polling. Partial retailer failures remain visible.
+
+One `ThreadPoolExecutor(max_workers=1)` runs the existing search service, which
+still calls Flipkart then Amazon. A lock atomically reserves the only active
+slot, protects status/results, and rejects additional submissions with HTTP 409;
+there is no accumulating search queue. Browser cleanup, parsing, normalization,
+and deduplication are unchanged. Completed jobs include per-retailer outcomes.
+Unexpected exceptions mark the job failed and release the slot. Disconnecting
+an HTTP client does not cancel or corrupt the background job.
+
+Completed/failed jobs expire after 30 minutes, with at most 50 retained. Cleanup
+runs on submissions, reads, and job completion; an idle process may retain expired
+records until its next operation. Active jobs are never evicted. This is a prototype:
+restarts, redeploys, Render suspension, or worker termination lose all job state.
+Job IDs act as access tokens; do not share result links containing private queries.
+There is no durable recovery, cancellation, or database. A stuck driver can keep
+the single slot busy until it exits or the service restarts; thread cancellation
+cannot safely terminate Selenium. Background execution does not bypass retailer
+CAPTCHAs, IP blocking, or memory limits.
+
+### Required web process configuration
+
+Keep Render's Docker Command unset so the image invokes `sh scripts/start_render.sh`.
+After the existing browser preflight, that script executes:
+
+```sh
+unset GUNICORN_CMD_ARGS
+exec gunicorn --config /dev/null --workers 1 --worker-class gthread --threads 2 --timeout 30 --bind "0.0.0.0:${PORT:-10000}" main:app
+```
+
+Clearing `GUNICORN_CMD_ARGS`, disabling automatic config-file loading with
+`--config /dev/null`, and supplying explicit flags prevents conflicting Gunicorn
+environment arguments, `WEB_CONCURRENCY`, or a default config file from changing
+this design. Two HTTP threads serve short requests; the one executor thread runs
+Selenium. Do not enable reload, multiple workers, multiple service instances, or
+an alternative startup command: separate processes cannot share these jobs.
+The 30-second Gunicorn timeout is unchanged. Existing Selenium timeout environment
+settings and the separate 15-second preflight timeout remain unchanged.
+
+### Manual local verification
+
+1. Start `python main.py` for local Windows verification (no browser preflight or
+   Gunicorn). Open `http://127.0.0.1:5000/` and confirm the existing UI and feedback
+   page load. This does not verify Linux startup.
+2. Submit invalid input to `/api/search`; expect 400, including JSON arrays and
+   non-string queries. Submit a valid query; expect 202 and a job ID promptly.
+3. While running, poll status and request results; expect queued/running and
+   HTTP 202 for unfinished results. Submit a second search through both API and
+   ordinary form; expect 409. The homepage/status requests should remain responsive.
+4. Observe Flipkart then Amazon progress. Completion must return existing product
+   dictionaries. One retailer failure must preserve the other retailer's products;
+   two failures must be failed, not a successful empty search. Check safe error stages.
+5. Reload the job URL to reconnect. Request an unknown ID; expect 404 with an
+   explicit restart/expiry message. Restart the process and reopen the old job URL;
+   expect the same explanation. Closing a tab must not cancel an active search.
+6. Check browser cleanup logs. Distinguish actual browser runs from controlled,
+   in-process checks using substituted retailer responses; the latter verify job
+   orchestration only. Do not infer live scraping success from them.
+7. Where Docker is available, build/run the image and confirm browser preflight
+   passes before Gunicorn starts with one gthread worker. With conflicting
+   `GUNICORN_CMD_ARGS` and `WEB_CONCURRENCY`, verify those remain fixed.
+
+### Manual Render verification after deployment
+
+1. Deploy the updated existing Docker service; inspect build logs for matching
+   Chromium/ChromeDriver. Confirm `browser_preflight_passed` precedes Gunicorn
+   startup, one worker, and `Using worker: gthread`.
+2. Open the real website. In browser Network tools submit `headphones`; confirm
+   `/api/search` promptly returns 202 and a job ID, followed by short status polls
+   rather than one long Selenium HTTP request.
+3. Observe both retailer outcomes and logs; confirm real product cards appear,
+   product links work, partial failures are visible, and polling stops at a terminal
+   state. Record CAPTCHA/blocked/navigation failures honestly.
+4. From another tab submit while busy; confirm 409 and a useful message. Check
+   homepage and feedback remain usable. Disconnect/reconnect and reload the job URL.
+5. Restart/redeploy, then poll an old job ID; confirm restart/expiry feedback and
+   ability to submit a fresh job. Confirm unexpected failures do not leave a slot
+   permanently occupied (a truly stuck driver is the limitation described above).
+
+Local orchestration checks cannot establish production success. An actual product
+search on the newly deployed Render service is required before claiming it works.
+
+
+### Local implementation verification recorded 2026-10-30
+
+Passed using Python 3.14 on Windows with Flask's in-process request client and
+controlled retailer responses (no real browser searches): app import and syntax;
+homepage, feedback page, static JS; invalid/malformed input rejection; immediate
+202 submission (~1 ms while the controlled search remained running); status and
+unfinished-results responses; API and form busy rejection; form 303 redirect;
+sequential retailer execution; partial success with unchanged normalization and
+URL deduplication; confirmed empty outcomes; both-retailer and unexpected failures;
+executor-submission failure recovery; missing/expired job messages; 16 concurrent
+submissions admitting exactly one; 50-record retention and active-job protection.
+
+Passed JavaScript syntax and controlled Node execution with a minimal DOM:
+submission/polling/results sequence; terminal completion and failure stopping
+polls; partial retailer error display; missing-job message; three-attempt connection
+failure limit; recovery after a transient disconnect. `git diff --check` passed.
+No new test suite/files or dependencies were added.
+
+No local checks failed. Not performed: visual browser verification, real local
+Selenium searches, Linux/Python 3.12 image execution, browser preflight, or actual
+Gunicorn runtime verification (Docker/shell unavailable in this Windows session).
+No Render deployment or production search was performed. The Render checklist
+above remains required after the user deploys these changes.
