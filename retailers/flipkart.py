@@ -488,6 +488,8 @@ def search_flipkart(query: str, max_results: int = 20, *, raise_on_error: bool =
                 diagnostics.event("navigation_timeout", retailer="Flipkart", stage="navigation",
                                   seconds=round(monotonic() - navigation_started, 2),
                                   **diagnostics.error_details(error))
+                diagnostics.navigation_timeout_snapshot(
+                    "Flipkart", driver, search_url, monotonic() - navigation_started, PRODUCT_CARD_SELECTOR)
                 raise  # Existing outcome handling classifies this as navigation_timeout.
             except Exception as error:
                 diagnostics.event("navigation_failed", retailer="Flipkart", stage="navigation",

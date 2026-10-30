@@ -275,6 +275,8 @@ def search_amazon(query: str, max_results: int = 10, *, raise_on_error: bool = T
                 diagnostics.event("navigation_timeout", retailer="Amazon", stage="navigation",
                                   seconds=round(monotonic() - navigation_started, 2),
                                   **diagnostics.error_details(error))
+                diagnostics.navigation_timeout_snapshot(
+                    "Amazon", driver, search_url, monotonic() - navigation_started, PRODUCT_CARD_SELECTOR)
                 raise  # Existing outcome handling classifies this as navigation_timeout.
             except Exception as error:
                 diagnostics.event("navigation_failed", retailer="Amazon", stage="navigation",

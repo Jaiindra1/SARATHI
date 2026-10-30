@@ -139,6 +139,7 @@ def create_browser():
                               driver_version=diagnostics.version_number(capabilities.get("chrome", {}).get("chromedriverVersion")))
         except Exception:
             diagnostics.event("browser_started", versions="unavailable")
+    diagnostics.browser_session_settings(driver, options.arguments)
     return driver
 
 
