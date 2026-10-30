@@ -480,9 +480,22 @@ def search_flipkart(query: str, max_results: int = 20, *, raise_on_error: bool =
         # Use the existing browser manager and its configured WebDriver.
         with browser_session() as driver:
             stage = "navigation"
-            diagnostics.event("navigation_started", retailer="Flipkart")
-            driver.get(search_url)
-            diagnostics.event("navigation_finished", retailer="Flipkart", seconds=round(monotonic() - started, 2))
+            navigation_started = monotonic()
+            diagnostics.event("navigation_started", retailer="Flipkart", stage="navigation")
+            try:
+                driver.get(search_url)
+            except TimeoutException as error:
+                diagnostics.event("navigation_timeout", retailer="Flipkart", stage="navigation",
+                                  seconds=round(monotonic() - navigation_started, 2),
+                                  **diagnostics.error_details(error))
+                raise  # Existing outcome handling classifies this as navigation_timeout.
+            except Exception as error:
+                diagnostics.event("navigation_failed", retailer="Flipkart", stage="navigation",
+                                  seconds=round(monotonic() - navigation_started, 2),
+                                  **diagnostics.error_details(error))
+                raise
+            diagnostics.event("navigation_finished", retailer="Flipkart", stage="navigation",
+                              seconds=round(monotonic() - navigation_started, 2))
             diagnostics.page("Flipkart", driver, "navigation_finished", PRODUCT_CARD_SELECTOR)
 
             stage = "results_wait"

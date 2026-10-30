@@ -117,3 +117,60 @@ real website search. No automated test suite is required for this verification.
 
 Sources: https://packages.debian.org/bookworm/chromium-driver and
 https://render.com/docs/docker.
+
+## Milestone 2A: bounded Selenium navigation
+
+In the existing Render service, open **Environment**, add the following variables,
+and save/redeploy the updated code. Keep the current Docker configuration,
+browser paths, and Gunicorn command unchanged:
+
+```dotenv
+SELENIUM_PAGE_LOAD_STRATEGY=eager
+SELENIUM_PAGE_LOAD_TIMEOUT=8
+SEARCH_DIAGNOSTICS=1
+```
+
+`SELENIUM_PAGE_LOAD_STRATEGY` accepts `normal`, `eager`, or `none`. The recommended
+Render value is `eager`: navigation waits for DOM readiness instead of the full
+page-load event. The existing product-element waits still determine when the
+listing is ready to parse. This does not bypass retailer blocking.
+
+`SELENIUM_PAGE_LOAD_TIMEOUT` accepts a positive finite number of seconds, including
+fractional seconds. Each newly created browser receives this value through
+`driver.set_page_load_timeout()`. Invalid settings fail before browser creation.
+An empty value is invalid; remove the variable to retain the existing default.
+If either variable is absent, its corresponding Selenium default is unchanged.
+Windows localhost may leave both variables unset; the same configuration also
+works with the existing explicit Linux browser and driver paths.
+
+The startup script's existing readiness browser retains its separate explicit
+15-second data-page timeout. Product searches use the configured 8-second value.
+No second browser or new browser-sharing lifecycle is introduced.
+
+Manual verification:
+
+1. After deployment, confirm `browser_preflight_passed` and open the actual website.
+2. Search for a common product such as `headphones` and follow its retailer trace
+   in Render runtime logs under `[search-diagnostics]`.
+3. Confirm `browser_navigation_settings` reports `page_load_strategy=eager` and
+   `page_load_timeout_seconds=8.0`.
+4. Navigation emits `navigation_started`, followed by `navigation_finished`,
+   `navigation_timeout`, or `navigation_failed`. These events' `seconds` values
+   measure navigation alone, excluding browser startup and cleanup. Failure
+   events include a safe exception type/reason and `stage=navigation`, without
+   logging the query, URL, raw page content, or exception message.
+5. A Selenium navigation timeout follows the existing retailer failure mechanism
+   with stage `navigation_timeout`. Existing partial-result behavior is retained.
+6. `browser_cleanup_started` is followed by `browser_cleanup_finished`, or
+   `browser_cleanup_failed` if `driver.quit()` raises. Cleanup duration is logged
+   separately; the existing quit behavior and exception propagation are retained.
+
+Limitations: the timeout is enforced by ChromeDriver, not an overall Python request
+deadline. An unresponsive driver or cleanup operation may still block. Fatal
+worker termination may prevent completion/failure logs from being emitted.
+The current 30-second Gunicorn limit remains unchanged, as do Flipkart's 25- and
+5-second product waits and Amazon's 25-second wait. Two separate browser startups,
+navigation, waits, cleanup, and serialization may still exceed that limit; Amazon
+fallback is not guaranteed within it. This milestone does not add request budgets,
+retries, process-killing logic, or automated test suites. Production success must
+be established by a real website search and its Render logs after deployment.

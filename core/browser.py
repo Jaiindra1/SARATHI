@@ -1,6 +1,7 @@
 
 from contextlib import contextmanager
 from functools import lru_cache
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -48,10 +49,46 @@ def _explicit_paths():
     return tuple(os.path.expandvars(os.path.expanduser(p)) for p in (browser, driver))
 
 
+def _navigation_settings():
+    """Unset values leave Selenium's existing defaults untouched."""
+    strategy = os.getenv("SELENIUM_PAGE_LOAD_STRATEGY")
+    if strategy is not None:
+        strategy = strategy.strip().lower()
+        if strategy not in {"normal", "eager", "none"}:
+            raise ValueError("SELENIUM_PAGE_LOAD_STRATEGY must be normal, eager, or none.")
+    raw_timeout = os.getenv("SELENIUM_PAGE_LOAD_TIMEOUT")
+    timeout = None
+    if raw_timeout is not None:
+        try:
+            timeout = float(raw_timeout)
+        except ValueError:
+            raise ValueError("SELENIUM_PAGE_LOAD_TIMEOUT must be a positive finite number of seconds.") from None
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("SELENIUM_PAGE_LOAD_TIMEOUT must be a positive finite number of seconds.")
+    return strategy, timeout
+
+
+def _quit_browser(driver):
+    """Observe the existing quit operation without imposing a time guarantee."""
+    started = monotonic()
+    diagnostics.event("browser_cleanup_started")
+    try:
+        driver.quit()
+    except Exception as error:
+        diagnostics.event("browser_cleanup_failed", seconds=round(monotonic() - started, 2),
+                          **diagnostics.error_details(error))
+        raise
+    else:
+        diagnostics.event("browser_cleanup_finished", seconds=round(monotonic() - started, 2))
+
+
 def create_browser():
     """Create and return a Selenium-controlled Chrome browser."""
 
+    strategy, page_load_timeout = _navigation_settings()
     options = Options()
+    if strategy is not None:
+        options.page_load_strategy = strategy
     options.add_argument("--headless=new")
     options.add_argument("--log-level=3")
     if sys.platform.startswith("linux"):
@@ -62,6 +99,7 @@ def create_browser():
     diagnostics.browser_environment()
     started = monotonic()
     diagnostics.event("browser_starting")
+    driver = None
     try:
         browser_path, driver_path = _explicit_paths()
         if browser_path:
@@ -77,11 +115,21 @@ def create_browser():
             # Preserve localhost Windows discovery when neither path is set.
             diagnostics.event("browser_configuration", mode="local_discovery", selenium_manager=True)
             driver = webdriver.Chrome(options=options)
+        if page_load_timeout is not None:
+            driver.set_page_load_timeout(page_load_timeout)
+        diagnostics.event("browser_navigation_settings", page_load_strategy=strategy or "default",
+                          page_load_timeout_seconds=page_load_timeout)
     except Exception as error:
         diagnostics.event("browser_start_failed", seconds=round(monotonic() - started, 2),
                           **diagnostics.error_details(error))
         # Manager may have downloaded a binary since the initial inventory.
         diagnostics.browser_environment(refresh=True)
+        # A failed timeout-configuration command must not leak a created browser.
+        if driver is not None:
+            try:
+                _quit_browser(driver)
+            except Exception:
+                pass  # Preserve the original configuration failure.
         raise
     if diagnostics.enabled():
         try:
@@ -103,4 +151,4 @@ def browser_session():
     try:
         yield driver
     finally:
-        driver.quit()
+        _quit_browser(driver)
