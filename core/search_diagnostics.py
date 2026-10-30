@@ -85,6 +85,8 @@ def browser_environment(refresh=False):
         from importlib.metadata import version
         browsers = [shutil.which(name) for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")]
         drivers = [shutil.which("chromedriver")]
+        configured_browser = os.getenv("CHROME_BINARY_PATH")
+        configured_driver = os.getenv("CHROMEDRIVER_PATH")
         # Manager cache availability is distinct from PATH availability.
         cache = Path(os.getenv("SE_CACHE_PATH") or Path.home() / ".cache" / "selenium")
         cached_chrome = list(cache.glob("chrome/**/chrome"))[:3] if cache.is_dir() else []
@@ -93,11 +95,14 @@ def browser_environment(refresh=False):
               selenium_version=version("selenium"), browser_on_path=any(browsers),
               driver_on_path=any(drivers), chrome_in_manager_cache=bool(cached_chrome),
               driver_in_manager_cache=bool(cached_driver),
+              explicit_browser_configured=bool(configured_browser),
+              explicit_driver_configured=bool(configured_driver),
               running_as_root=(os.geteuid() == 0) if hasattr(os, "geteuid") else False)
         if platform.system() == "Linux" and Path("/dev/shm").is_dir():
             space = shutil.disk_usage("/dev/shm")
             event("shared_memory", total_mb=space.total // (1024 * 1024), free_mb=space.free // (1024 * 1024))
-        for kind, candidates in [("chrome", browsers + cached_chrome), ("chromedriver", drivers + cached_driver)]:
+        for kind, candidates in [("chrome", [configured_browser] + browsers + cached_chrome),
+                                 ("chromedriver", [configured_driver] + drivers + cached_driver)]:
             binary = next((str(p) for p in candidates if p and Path(p).is_file()), None)
             if not binary:
                 continue

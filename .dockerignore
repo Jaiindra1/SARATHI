@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+secrets
+**/*.json
+**/*.pem
+**/*.key
+.venv
+venv
+**/__pycache__
+**/*.pyc
+page_inspections
+output
+test_*.py
+*.png
+*.zip
