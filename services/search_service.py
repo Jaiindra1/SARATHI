@@ -7,6 +7,7 @@ from services.search_filter import filter_products
 from models.product import Product
 from retailers.flipkart import search_flipkart
 from retailers.amazon import search_amazon
+from retailers.outcomes import AllRetailersFailed, RetailerSearchError
 
 logger = logging.getLogger(__name__)
 
@@ -95,15 +96,18 @@ def search_products(query: str, max_results: int = 20) -> list[dict]:
             retailer_results[retailer_name] = search_function(
                 query=query,
                 max_results=max_results,
+                raise_on_error=True,
             )
         except Exception as error:
-            logger.exception("%s product search failed", retailer_name)
+            stage = error.stage if isinstance(error, RetailerSearchError) else "unexpected_failure"
+            logger.error("Retailer unavailable retailer=%s stage=%s error_type=%s",
+                         retailer_name, stage, type(error).__name__)
             retailer_results[retailer_name] = []
             retailer_errors.append(retailer_name)
 
     # Report an error only if both retailer searches raised exceptions.
     if len(retailer_errors) == 2:
-        raise RuntimeError(
+        raise AllRetailersFailed(
             "Both Flipkart and Amazon searches failed. "
             "Check the application logs for details."
         )

@@ -4,6 +4,7 @@ from flask import Flask, render_template, request, jsonify
 
 from services.search_service import search_products
 from services.feedback_service import send_feedback_email
+from retailers.outcomes import AllRetailersFailed
 
 
 app = Flask(__name__, template_folder="templates")
@@ -90,6 +91,14 @@ def api_search():
             ),
             "products": products,
         }), 200
+
+    except AllRetailersFailed:
+        app.logger.error("AJAX product search failed: all retailers unavailable")
+        return jsonify({
+            "success": False,
+            "message": "Retailer searches are unavailable. Please try again later.",
+            "products": [],
+        }), 502
 
     except Exception:
         app.logger.exception("AJAX product search failed")

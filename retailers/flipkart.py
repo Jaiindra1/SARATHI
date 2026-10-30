@@ -13,6 +13,7 @@ HTML inspection files.
 """
 
 import logging
+from time import monotonic
 import re
 from urllib.parse import quote, urljoin, urlparse
 
@@ -23,6 +24,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from core.browser import browser_session
+from core import search_diagnostics as diagnostics
+from retailers.outcomes import RetailerSearchError, empty_result_or_raise, fail
 
 
 logger = logging.getLogger(__name__)
@@ -447,27 +450,12 @@ def _dismiss_login_popup(driver):
             continue
 
 
-def _save_diagnostics(driver):
-    """
-    Log the current page state for troubleshooting.
-
-    Deliberately does not write or overwrite HTML/screenshot files.
-    """
-    try:
-        logger.warning("Flipkart page URL after search: %s", driver.current_url)
-        logger.warning("Flipkart page title after search: %s", driver.title)
-
-        page_text = _clean_text(driver.find_element(By.TAG_NAME, "body").text)
-        logger.warning("Flipkart visible page text (first 500 chars): %s", page_text[:500])
-    except WebDriverException:
-        logger.debug("Could not read Flipkart diagnostic information.", exc_info=True)
-
-
-def search_flipkart(query: str, max_results: int = 20) -> list[dict]:
+def search_flipkart(query: str, max_results: int = 20, *, raise_on_error: bool = True) -> list[dict]:
     """
     Search Flipkart using Selenium and return normalized product dictionaries.
 
-    This preserves the interface expected by services/search_service.py.
+    Failures always raise; an empty list requires explicit no-results evidence.
+    raise_on_error is retained as a compatibility keyword.
     """
     query = (query or "").strip()
 
@@ -483,14 +471,21 @@ def search_flipkart(query: str, max_results: int = 20) -> list[dict]:
     max_results = max(1, min(max_results, 20))
     search_url = build_flipkart_search_url(query)
 
-    logger.info("Searching Flipkart for: %s", query)
-    logger.info("Opening Flipkart search URL: %s", search_url)
+    logger.info("Retailer search started retailer=Flipkart")
+    diagnostics.begin("Flipkart")
+    started = monotonic()
+    stage = "browser_startup"
 
     try:
         # Use the existing browser manager and its configured WebDriver.
         with browser_session() as driver:
+            stage = "navigation"
+            diagnostics.event("navigation_started", retailer="Flipkart")
             driver.get(search_url)
+            diagnostics.event("navigation_finished", retailer="Flipkart", seconds=round(monotonic() - started, 2))
+            diagnostics.page("Flipkart", driver, "navigation_finished", PRODUCT_CARD_SELECTOR)
 
+            stage = "results_wait"
             try:
                 WebDriverWait(driver, 25).until(
                     lambda current_driver: (
@@ -503,9 +498,8 @@ def search_flipkart(query: str, max_results: int = 20) -> list[dict]:
                     )
                 )
             except TimeoutException:
-                # Keep diagnostics, but don't crash the Flask request.
-                _save_diagnostics(driver)
-                return []
+                diagnostics.page("Flipkart", driver, "results_timeout", PRODUCT_CARD_SELECTOR)
+                return empty_result_or_raise("Flipkart", driver, "results_timeout")
 
             _dismiss_login_popup(driver)
 
@@ -517,9 +511,10 @@ def search_flipkart(query: str, max_results: int = 20) -> list[dict]:
                     )
                 )
             except TimeoutException:
-                _save_diagnostics(driver)
-                return []
+                diagnostics.page("Flipkart", driver, "results_timeout", PRODUCT_CARD_SELECTOR)
+                return empty_result_or_raise("Flipkart", driver, "results_timeout")
 
+            stage = "parsing"
             html = driver.page_source
             products = parse_product_cards(
                 html=html,
@@ -527,19 +522,22 @@ def search_flipkart(query: str, max_results: int = 20) -> list[dict]:
                 base_url=driver.current_url or FLIPKART_URL,
             )
 
+            diagnostics.page("Flipkart", driver, "parsed", PRODUCT_CARD_SELECTOR, products=len(products))
             if not products:
-                logger.warning(
-                    "Product links were found, but no cards could be parsed. "
-                    "Flipkart's markup may have changed."
-                )
-                _save_diagnostics(driver)
-
-            logger.info("Extracted %d Flipkart products.", len(products))
+                return empty_result_or_raise("Flipkart", driver, "parsing_failure")
+            logger.info("Retailer search completed retailer=Flipkart products=%d", len(products))
+            stage = "browser_cleanup"
             return products
 
-    except (TimeoutException, WebDriverException) as exc:
-        logger.exception("Flipkart browser search failed: %s", exc)
-        return []
-    except Exception:
-        logger.exception("Unexpected error during Flipkart search.")
-        return []
+    except RetailerSearchError as error:
+        diagnostics.event("retailer_failed", retailer="Flipkart", stage=error.stage,
+                          seconds=round(monotonic() - started, 2), **diagnostics.error_details(error))
+        raise
+    except TimeoutException as error:
+        diagnostics.event("retailer_failed", retailer="Flipkart", stage=stage,
+                          seconds=round(monotonic() - started, 2), **diagnostics.error_details(error))
+        fail("Flipkart", "navigation_timeout" if stage == "navigation" else stage, error)
+    except Exception as error:
+        diagnostics.event("retailer_failed", retailer="Flipkart", stage=stage,
+                          seconds=round(monotonic() - started, 2), **diagnostics.error_details(error))
+        fail("Flipkart", stage, error)
