@@ -64,6 +64,9 @@ def home():
             query, message = job["query"], job["message"]
             if job["status"] in {"completed", "failed"}:
                 products = job["products"]
+                warning = job.get("persistence", {}).get("warning")
+                if warning:
+                    message = f"{message} {warning}"
     return render_template("index.html", query=query, products=products,
                            message=message, job_id=job_id), status_code
 

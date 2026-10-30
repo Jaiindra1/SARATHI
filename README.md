@@ -1,12 +1,176 @@
-Create a virtual environment
-Run:
+# SARTHI 1.2
+
+Flask product search using the existing Amazon India and Flipkart Selenium and
+BeautifulSoup scrapers. SQLite stores product observations, price history, and
+search records. No AI, LLM, cloud database, credentials, or database server is used.
+Existing cards, highlights, loading animation, and search endpoints are unchanged.
+
+## Local setup
+
+From `scraper-service` in PowerShell:
+
+```powershell
 python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python -c "from services.sqlite_client import initialize_database; initialize_database()"
+python check_database.py
+python main.py
+```
 
-This creates an isolated Python environment inside your project.
+Open http://127.0.0.1:5000. Chrome and a compatible driver must be available for
+actual searches. SQLite is included in Python; no extra package is needed.
+SMTP settings remain optional for feedback delivery.
 
-Activate it:
+## Local persistence
 
-.venv\Scripts\activate
+There was no existing SQLite file, schema, or connection utility in this checkout.
+The repository interface is retained, backed by one SQLite database at
+`data/products.sqlite3`. Set optional `SQLITE_DATABASE_PATH` to use another file;
+relative paths resolve against the project root, absolute paths are supported.
+The parent directory must be writable. Importing the application does not create
+or open the database. Initialization or the first persistence operation creates
+missing tables using `CREATE TABLE IF NOT EXISTS`; no table is dropped or cleared.
+An incompatible existing schema is not silently reset. Back it up and inspect it
+before changing its schema. Do not point this setting at an unrelated database.
+
+HTTP routes -> SearchJobs single executor -> search_products with progress and
+search_id=job_id -> existing retailer adapters/Product model -> track_search ->
+SQLite repository. Each database operation owns and closes its own connection.
+HTTP routes never scrape or save observations inline.
+
+Tables:
+
+- `products`: SHA-256 product ID, retailer-qualified identity key (unique),
+  product_name, retailer, product_url, product_image, current_price, original_price,
+  currency, first_seen, last_checked, price_status, and `product_data` JSON retaining
+  all fields of the first normalized product observation, including specifications,
+  highlights, rating, category, and availability.
+- `price_history`: product_id, search_id, price, currency, recorded_at, change_type;
+  primary key `(product_id, search_id)` keeps retry writes idempotent.
+- `searches`: search_id primary key and merged JSON data containing the query,
+  UTC timestamp, retailer outcomes, product count/IDs, and persistence status.
+
+The repository's existing identity function is preserved: Amazon ASIN, Flipkart
+PID, or retailer-qualified canonical URL. Known tracking parameters are removed;
+variant parameters are retained. Names never serve as identities. Retailers remain
+separate, and search-result deduplication is unchanged.
+
+Price normalization is unchanged. Invalid/missing prices never replace a valid
+stored price. First valid prices create initial history; changed prices add history;
+unchanged prices update only last_checked. Older observations cannot replace newer
+ones. Product metadata retains the existing first-observation behavior. All times
+are stored as UTC ISO-8601 strings. Repository product reads return datetime values
+for first_seen/last_checked, preserving the Python contract.
+
+Each product read/update/history write uses one `BEGIN IMMEDIATE` transaction.
+Separate connections allow thread use, with a 10-second SQLite lock wait. Failed
+writes roll back; errors remain visible through the existing persistence warning
+without discarding scraped cards. Search records commit separately, so interruption
+may leave a search marked processing while prior product commits remain intact.
+
+`python check_database.py` opens an existing database read-only, runs quick_check,
+and prints row counts. It never creates a missing database. Back up a database
+while the service is stopped or use SQLite's backup API for a consistent live copy.
+Existing JSON exports and browser snapshots are left untouched, not imported or
+deleted automatically. Remote records from a former cloud backend are not migrated
+by this change: no export or access was supplied. Retain any needed remote data
+and obtain an export for a separately verified migration before removing that data.
+
+## Combined background-search and persistence contract
+
+Both POST routes retain the remote job manager. The API immediately returns 202
+with job/status/results URLs; ordinary form POST returns 303 to its job page.
+A 128-bit client request ID makes repeat submissions return the existing job.
+Reusing it with a different query returns 409. A new request while busy returns
+409. Request lookup, admission, and job state remain lock-protected; only one
+executor runs Selenium. Existing browser reload and lost-response recovery remain.
+
+The service interface is:
+
+    search_products(query, max_results=20, *, progress=None, search_id=None)
+
+Existing CLI callers can omit both optional arguments and still receive a
+list-compatible result. The background executor supplies its job ID as the stored
+search ID, so retried submissions do not create duplicate search records.
+The existing retailer progress callbacks are preserved.
+
+After both sequential retailer attempts and product normalization/deduplication,
+the same executor persists observations and the search summary. Database operations
+run outside the job-state lock, so HTTP polling continues while saving. No second
+executor, queue, database system, or dependency is introduced. SQLite's existing
+10-second lock wait is per operation, not a whole-job deadline; the active slot
+remains reserved until persistence finishes. A failed save retains scraped cards.
+
+Completed job status/results include persistence with search_id, status,
+saved_count, and an optional warning. JavaScript adds that warning to the
+existing results area; ordinary job pages also show it. Partial retailer failures
+retain successful listings and save a partial search summary. When both retailers
+fail, the service records the failed search and attaches the persistence report
+to the existing failure; the job still ends as failed with retailer outcomes.
+
+Product observations and search summaries are durable only to the extent that
+the SQLite file is durable. Jobs and request-ID mappings remain in memory, with
+the existing 30-minute/50-completed-job retention. Restart/expiry loses those
+mappings even if SQLite still has the corresponding historical search record.
+No durable job resumption or cancellation is added.
+
+The boundary fixture uses each adapter's SEARCH_URL with a fixed query. Only the
+obsolete Flipkart base constant/defaults are renamed to SEARCH_BASE_URL;
+SEARCH_URL, selectors, parsing, navigation, and timeout snapshots are retained.
+Amazon, browser settings, and one-worker/two-gthread-thread startup are retained.
+
+## Combined verification
+
+Run only the named offline/localhost checks, not blanket test discovery:
+
+    python -m unittest test_background_search test_retailer_outcomes test_sqlite_integration test_specification_extractor test_frontend_integration
+    node --check static/js/search.js
+    node --check test_frontend_polling.cjs
+    python check_database.py
+
+Node is used only by the frontend verification harness, with built-in Node modules;
+it is not an application dependency or backend runtime. Without Node that one
+harness test is explicitly skipped. All other tests use existing Python
+dependencies and the standard library.
+
+The 61 automated checks exercise the combined architecture: 202/303 submission,
+running/terminal polling, shared busy protection, 16 simultaneous idempotent
+submissions, lost-response recovery, optional progress callbacks, SQLite writes,
+partial/total retailer failure, persistence warnings, retention, transaction
+rollback, concurrent observations, and product identity/history. The JavaScript
+harness runs the shipped search.js against a real local Flask server and temporary
+SQLite database with a minimal DOM and substituted retailer adapters. It verifies
+polling, product rendering, rupee symbols, errors, and persistence warnings.
+It is not visual browser verification or a live retailer test.
+
+No existing database is used as a test fixture. Tests create isolated temporary
+databases. For manual local startup against an intended preserved database, confirm
+SQLITE_DATABASE_PATH first, then run python main.py; opening the homepage does
+not perform a retailer search. The database checker reads without creating a DB.
+Linux/Python 3.12 Docker preflight and real retailer searches still require
+separate verification; passing these checks does not establish Render success.
+
+## Deployment persistence
+
+Keep Render's Docker Command unset so the supplied startup script executes.
+Gunicorn remains one gthread worker, two HTTP threads, and a 30-second timeout;
+GUNICORN_CMD_ARGS is cleared and explicit flags/config prevent conflicting overrides.
+Existing Selenium strategy/timeout environment settings are unchanged, including
+the separate 15-second preflight override.
+
+SQLite requires a writable file. The default is data/products.sqlite3 under the
+project root. For persistence across redeployment/replacement, mount persistent
+storage and set SQLITE_DATABASE_PATH to an absolute path on that mount. Ensure
+appuser (UID 10001) can write the directory as well as its database/journal files.
+Use one service instance because job state and idempotency mappings are process-local.
+
+The image deliberately excludes local databases, exports, credentials, and tests.
+Restore a consistent backup to the deployment's persistent volume separately;
+deploying code does not copy the local database or migrate remote records.
+If storage is ephemeral, historical records may be lost on replacement. Do not
+claim durable production persistence until restart/redeployment checks establish it.
 
 ## Manual production search diagnostics
 
@@ -202,7 +366,8 @@ runs on submissions, reads, and job completion; an idle process may retain expir
 records until its next operation. Active jobs are never evicted. This is a prototype:
 restarts, redeploys, Render suspension, or worker termination lose all job state.
 Job IDs act as access tokens; do not share result links containing private queries.
-There is no durable recovery, cancellation, or database. A stuck driver can keep
+There is no durable job recovery or cancellation. SQLite retains observations and
+search summaries, but does not restore process-local jobs. A stuck driver can keep
 the single slot busy until it exits or the service restarts; thread cancellation
 cannot safely terminate Selenium. Background execution does not bypass retailer
 CAPTCHAs, IP blocking, or memory limits.
@@ -270,7 +435,7 @@ Local orchestration checks cannot establish production success. An actual produc
 search on the newly deployed Render service is required before claiming it works.
 
 
-### Local implementation verification recorded 2026-10-30
+### Baseline verification before SQLite integration (historical)
 
 Passed using Python 3.14 on Windows with Flask's in-process request client and
 controlled retailer responses (no real browser searches): app import and syntax;

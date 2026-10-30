@@ -30,7 +30,7 @@ from retailers.outcomes import RetailerSearchError, empty_result_or_raise, fail
 
 logger = logging.getLogger(__name__)
 
-FLIPKART_URL = "https://www.flipkart.com/"
+SEARCH_BASE_URL = "https://www.flipkart.com/search"
 SEARCH_URL = "https://www.flipkart.com/search?q={query}"
 
 # Known card layouts found in the project's saved HTML snapshots.
@@ -329,7 +329,7 @@ def _extract_availability(card) -> str:
     return None
 
 
-def extract_product_from_card(card, base_url=FLIPKART_URL):
+def extract_product_from_card(card, base_url=SEARCH_BASE_URL):
     """Parse one BeautifulSoup product card into the service's data format."""
     name = _extract_title(card)
     url = _extract_product_url(card, base_url)
@@ -362,7 +362,7 @@ def extract_product_from_card(card, base_url=FLIPKART_URL):
 def parse_product_cards(
     html: str,
     max_results: int = 20,
-    base_url: str = FLIPKART_URL,
+    base_url: str = SEARCH_BASE_URL,
 ) -> list[dict]:
     """
     Parse saved HTML without opening a browser or making a network request.
@@ -534,7 +534,7 @@ def search_flipkart(query: str, max_results: int = 20, *, raise_on_error: bool =
             products = parse_product_cards(
                 html=html,
                 max_results=max_results,
-                base_url=driver.current_url or FLIPKART_URL,
+                base_url=driver.current_url or SEARCH_BASE_URL,
             )
 
             diagnostics.page("Flipkart", driver, "parsed", PRODUCT_CARD_SELECTOR, products=len(products))

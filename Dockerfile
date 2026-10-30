@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code explicitly so local snapshots and credential files do
 # not enter the image, even if the build context contains unrelated local work.
 COPY main.py ./
+COPY check_database.py ./
 COPY config/ ./config/
 COPY core/ ./core/
 COPY models/ ./models/

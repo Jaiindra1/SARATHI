@@ -23,3 +23,16 @@ page_inspections/
 response*.json
 .env.*
 !.env.example
+
+# Backend credentials must never enter source control.
+secrets/
+*adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+
+# Local database and SQLite transaction files
+data/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm

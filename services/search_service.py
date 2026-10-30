@@ -1,15 +1,21 @@
-from services.specification_extractor import extract_highlights
-
-from models.product import Product
-from retailers.flipkart import search_flipkart
 import logging
-from services.search_filter import filter_products
+
 from models.product import Product
 from retailers.flipkart import search_flipkart
 from retailers.amazon import search_amazon
 from retailers.outcomes import AllRetailersFailed, RetailerSearchError
+from services.specification_extractor import extract_highlights
+from services.product_repository import product_identity
+from services.price_tracking_service import track_search
 
 logger = logging.getLogger(__name__)
+
+
+class SearchResults(list):
+    """Keep direct-call list compatibility and attach the persistence report."""
+    def __init__(self, products, persistence):
+        super().__init__(products)
+        self.persistence = persistence
 
 
 def detect_category(query: str, product_name: str) -> str:
@@ -71,7 +77,7 @@ def detect_category(query: str, product_name: str) -> str:
 
 
 
-def search_products(query: str, max_results: int = 20, *, progress=None) -> list[dict]:
+def search_products(query: str, max_results: int = 20, *, progress=None, search_id=None) -> list[dict]:
 
     """Search Flipkart and Amazon and combine their product results."""
 
@@ -114,10 +120,12 @@ def search_products(query: str, max_results: int = 20, *, progress=None) -> list
 
     # Report an error only if both retailer searches raised exceptions.
     if len(retailer_errors) == 2:
-        raise AllRetailersFailed(
+        error = AllRetailersFailed(
             "Both Flipkart and Amazon searches failed. "
             "Check the application logs for details."
         )
+        error.persistence = track_search(query, [], retailer_errors, search_id=search_id)
+        raise error
 
     products = []
     seen_urls = set()
@@ -134,7 +142,12 @@ def search_products(query: str, max_results: int = 20, *, progress=None) -> list
             # Avoid showing the same URL more than once.
             product_url = item.get("url")
             if product_url:
-                normalized_url = product_url.rstrip("/").split("?")[0]
+                try:
+                    normalized_url = product_identity({
+                        "retailer": item.get("retailer") or retailer_name, "url": product_url,
+                    })[0]
+                except ValueError:
+                    normalized_url = (retailer_name, product_url)
 
                 if normalized_url in seen_urls:
                     continue
@@ -168,4 +181,4 @@ def search_products(query: str, max_results: int = 20, *, progress=None) -> list
 
             products.append(product.to_dict())
 
-    return products
+    return SearchResults(products, track_search(query, products, retailer_errors, search_id=search_id))

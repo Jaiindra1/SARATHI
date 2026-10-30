@@ -307,6 +307,9 @@ async function followJob(jobId) {
             } else {
                 displayProducts(result.products);
             }
+            if (result.persistence?.warning) {
+                resultsContainer.prepend(createTextElement("p", result.persistence.warning));
+            }
             resultsContainer.append(createTextElement("p", retailerSummary(result.retailers)));
             return;
         }

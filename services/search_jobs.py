@@ -62,6 +62,7 @@ class SearchJobs:
             self._jobs[job_id] = {
                 "job_id": job_id, "request_id": request_id, "query": query, "status": "queued",
                 "message": "Search queued.", "products": [],
+                "persistence": {"status": "pending"},
                 "retailers": {name: {"status": "queued"} for name in ("Flipkart", "Amazon")},
             }
             self._active = job_id
@@ -91,12 +92,13 @@ class SearchJobs:
             with self._lock:
                 self._jobs[job_id].update(status="running", message="Searching Flipkart and Amazon...")
             products = search_products(
-                query, max_results=20,
+                query, max_results=20, search_id=job_id,
                 progress=lambda retailer, status, **details: self._progress(job_id, retailer, status, **details),
             )
             with self._lock:
                 self._jobs[job_id].update(
-                    status="completed", products=products,
+                    status="completed", products=list(products),
+                    persistence=getattr(products, "persistence", {}),
                     message="Products found successfully." if products else "No matching products found. Try another search.",
                 )
         except Exception as error:
@@ -104,6 +106,7 @@ class SearchJobs:
             with self._lock:
                 self._jobs[job_id].update(
                     status="failed",
+                    persistence=getattr(error, "persistence", {}),
                     message=("Retailer searches are unavailable. Please try again later."
                              if isinstance(error, AllRetailersFailed)
                              else "Product search failed unexpectedly. Please try again later."),

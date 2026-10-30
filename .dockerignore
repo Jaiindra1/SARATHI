@@ -12,5 +12,13 @@ venv
 page_inspections
 output
 test_*.py
+test_*.cjs
 *.png
 *.zip
+
+data
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*-wal
+**/*-shm
